@@ -1,34 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
-
 import {
-  ArrowRight,
-  Check,
-  File,
-  FileArchive,
-  FileAudio,
-  FileCode,
-  FileImage,
-  FileText,
-  FileVideo,
-  Folder,
-  FolderOpen,
-  LoaderCircle,
-  RefreshCw,
-  ShieldCheck,
-  LockKeyhole,
-  Search,
-  Eye,
-  X,
-  ChevronLeft,
-  ChevronRight,
-  Download,
-  Sun,
-  Moon,
-  Sparkles,
-  Monitor,
-  HardDrive,
-  ShieldCheck as Shield,
+  ArrowRight, Check, File, FileArchive, FileAudio, FileCode,
+  FileImage, FileText, FileVideo, Folder, FolderOpen,
+  LoaderCircle, RefreshCw, ShieldCheck, LockKeyhole, Search,
+  Eye, X, ChevronLeft, ChevronRight, Download, Sun, Moon,
+  Sparkles, Monitor, HardDrive, ShieldCheck as Shield,
 } from "lucide-react";
+
+const API_BASE_URL = import.meta.env.VITE_API_URL || "";
 
 const GROUPS = [
   {
@@ -194,7 +173,6 @@ export default function App() {
   );
 
   const selectedGroup = GROUPS.find((group) => group.id === activeCategory);
-
   const subcategories = selectedGroup ? Object.keys(selectedGroup.subs) : [];
 
   const locked =
@@ -222,7 +200,7 @@ export default function App() {
 
   async function refreshAccess() {
     try {
-      const response = await fetch(`/api/access/${clientId}`);
+      const response = await fetch(`${API_BASE_URL}/api/access/${clientId}`);
 
       if (!response.ok) {
         throw new Error("Could not check your plan.");
@@ -271,7 +249,6 @@ export default function App() {
       });
 
       await requestWrite(handle);
-
       closePreview();
 
       setDirectory(handle);
@@ -450,7 +427,7 @@ export default function App() {
       }
 
       if (moved > 0 && !currentAccess.is_pro) {
-        const usage = await fetch("/api/usage/complete", {
+        const usage = await fetch(`${API_BASE_URL}/api/usage/complete`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -501,21 +478,23 @@ export default function App() {
     remaining.sort((a, b) => a.name.localeCompare(b.name));
     setFiles(remaining);
   }
-
   async function startPayment() {
     setPaying(true);
     setMessage("");
 
     try {
-      const orderResponse = await fetch("/api/payments/create-order", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
+      const orderResponse = await fetch(
+        `${API_BASE_URL}/api/payments/create-order`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            client_id: clientId,
+          }),
         },
-        body: JSON.stringify({
-          client_id: clientId,
-        }),
-      });
+      );
 
       const order = await orderResponse.json();
 
@@ -549,7 +528,7 @@ export default function App() {
 
         handler: async (response) => {
           try {
-            const verify = await fetch("/api/payments/verify", {
+            const verify = await fetch(`${API_BASE_URL}/api/payments/verify`, {
               method: "POST",
               headers: {
                 "Content-Type": "application/json",
@@ -827,7 +806,6 @@ export default function App() {
             </span>
           </div>
         </section>
-
         <section className="organizer-card">
           <div className="card-topline">
             <div>
@@ -899,8 +877,7 @@ export default function App() {
           </button>
 
           {message && <div className="message">{message}</div>}
-        </section>
-
+        </section>{" "}
         {files.length > 0 && (
           <section className="results">
             <div className="results-top">
@@ -1109,7 +1086,6 @@ export default function App() {
             </div>
           </section>
         )}
-
         <section className="bottom-row">
           <div className="usage-card">
             <div className="plan-icon">
@@ -1152,7 +1128,6 @@ export default function App() {
             </div>
           )}
         </section>
-
         <section className="privacy-promise">
           <div className="privacy-promise-icon">
             <ShieldCheck size={19} />
@@ -1172,7 +1147,6 @@ export default function App() {
             <ArrowRight size={14} />
           </button>
         </section>
-
         <section className="how-it-works">
           <div className="label">SIMPLE BY DESIGN</div>
           <h2>A little order goes a long way.</h2>
@@ -1215,7 +1189,6 @@ export default function App() {
             </div>
           </div>
         </section>
-
         <div className="footnote">
           <ShieldCheck size={14} />
           Your selected files are processed locally in your browser. Only
@@ -1248,3 +1221,4 @@ export default function App() {
     </div>
   );
 }
+
