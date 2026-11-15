@@ -1,16 +1,18 @@
 
-from pydantic import BaseModel, Field
-from uuid import UUID
+from pydantic import BaseModel, EmailStr, Field
 
 
-class ClientPayload(BaseModel):
-    client_id: UUID
+class SignupPayload(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
+
+
+class LoginPayload(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=1, max_length=128)
 
 
 class PaymentVerifyPayload(BaseModel):
-
-    client_id: UUID
-
     razorpay_order_id: str = Field(
         min_length=5,
         max_length=100

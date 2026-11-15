@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ArrowRight, Check, File, FileArchive, FileAudio, FileCode,
   FileImage, FileText, FileVideo, Folder, FolderOpen,
@@ -102,17 +102,6 @@ const formatBytes = (bytes) => {
   return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
 };
 
-function getClientId() {
-  let id = localStorage.getItem("desksweep_client_id");
-
-  if (!id) {
-    id = crypto.randomUUID();
-    localStorage.setItem("desksweep_client_id", id);
-  }
-
-  return id;
-}
-
 function getFileIcon(category) {
   return GROUPS.find((group) => group.id === category)?.icon || File;
 }
@@ -128,6 +117,17 @@ export default function App() {
 
   const [access, setAccess] = useState(null);
   const [paying, setPaying] = useState(false);
+  const [token, setToken] = useState(
+    () => localStorage.getItem("desksweep_token") || "",
+  );
+  const [authOpen, setAuthOpen] = useState(false);
+  const [authEmail, setAuthEmail] = useState("");
+  const [authMode, setAuthMode] = useState("login");
+  const [authLoading, setAuthLoading] = useState(
+    () => Boolean(localStorage.getItem("desksweep_token")),
+  );
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authError, setAuthError] = useState("");
 
   const [searchQuery, setSearchQuery] = useState("");
   const [currentPage, setCurrentPage] = useState(1);
@@ -140,8 +140,6 @@ export default function App() {
   const [theme, setTheme] = useState(
     () => localStorage.getItem("desksweep_theme") || "light",
   );
-
-  const clientId = useMemo(() => getClientId(), []);
 
   const supported =
     typeof window !== "undefined" && "showDirectoryPicker" in window;
@@ -185,8 +183,18 @@ export default function App() {
   }, [theme]);
 
   useEffect(() => {
-    refreshAccess();
-  }, []);
+    if (!token) {
+      localStorage.removeItem("desksweep_token");
+      setAccess(null);
+      setAuthEmail("");
+      setAuthLoading(false);
+      return;
+    }
+
+    localStorage.setItem("desksweep_token", token);
+    setAuthLoading(true);
+    refreshAccess().finally(() => setAuthLoading(false));
+  }, [token]);
 
   useEffect(() => {
     setCurrentPage(1);
@@ -200,7 +208,17 @@ export default function App() {
 
   async function refreshAccess() {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/access/${clientId}`);
+      const response = await fetch(`${API_BASE_URL}/api/access`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      if (response.status === 401) {
+        setToken("");
+        setMessage("Your session expired. Please sign in again.");
+        return null;
+      }
 
       if (!response.ok) {
         throw new Error("Could not check your plan.");
@@ -208,6 +226,7 @@ export default function App() {
 
       const data = await response.json();
       setAccess(data);
+      setAuthEmail(data.email);
       return data;
     } catch {
       setMessage(
@@ -215,6 +234,61 @@ export default function App() {
       );
       return null;
     }
+  }
+
+  async function submitAuth(event) {
+    event.preventDefault();
+    setAuthBusy(true);
+    setAuthError("");
+
+    const form = new FormData(event.currentTarget);
+
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/api/auth/${authMode === "signup" ? "signup" : "login"}`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            email: form.get("email"),
+            password: form.get("password"),
+          }),
+        },
+      );
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(result.detail || "Could not authenticate.");
+      }
+
+      localStorage.setItem("desksweep_token", result.access_token);
+      setAccess(result);
+      setAuthEmail(result.email);
+      setAuthOpen(false);
+      setToken(result.access_token);
+    } catch (error) {
+      setAuthError(error.message || "Could not authenticate.");
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  function signOut() {
+    localStorage.removeItem("desksweep_token");
+    setToken("");
+    setAccess(null);
+    setDirectory(null);
+    setFiles([]);
+    closePreview();
+    setMessage("");
+  }
+
+  function openAuth(mode) {
+    setAuthMode(mode);
+    setAuthError("");
+    setAuthOpen(true);
   }
 
   async function requestWrite(handle) {
@@ -235,6 +309,11 @@ export default function App() {
 
   async function selectFolder() {
     setMessage("");
+
+    if (!token || authLoading) {
+      openAuth("login");
+      return;
+    }
 
     if (!supported) {
       setMessage(
@@ -266,6 +345,10 @@ export default function App() {
 
   async function scanFolder() {
     if (!directory || busy) return;
+    if (!token || authLoading) {
+      openAuth("login");
+      return;
+    }
 
     setBusy(true);
     setMessage("");
@@ -355,6 +438,10 @@ export default function App() {
 
   async function organizeFiles() {
     if (!directory || !files.length || busy) return;
+    if (!token || authLoading) {
+      openAuth("login");
+      return;
+    }
 
     let currentAccess = access;
 
@@ -430,11 +517,8 @@ export default function App() {
         const usage = await fetch(`${API_BASE_URL}/api/usage/complete`, {
           method: "POST",
           headers: {
-            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
           },
-          body: JSON.stringify({
-            client_id: clientId,
-          }),
         });
 
         if (!usage.ok) {
@@ -488,11 +572,8 @@ export default function App() {
         {
           method: "POST",
           headers: {
-            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
           },
-          body: JSON.stringify({
-            client_id: clientId,
-          }),
         },
       );
 
@@ -531,10 +612,10 @@ export default function App() {
             const verify = await fetch(`${API_BASE_URL}/api/payments/verify`, {
               method: "POST",
               headers: {
+                Authorization: `Bearer ${token}`,
                 "Content-Type": "application/json",
               },
               body: JSON.stringify({
-                client_id: clientId,
                 razorpay_order_id: response.razorpay_order_id,
                 razorpay_payment_id: response.razorpay_payment_id,
                 razorpay_signature: response.razorpay_signature,
@@ -548,7 +629,7 @@ export default function App() {
             }
 
             setAccess(result);
-            setMessage("Payment verified. DeskSweep Pro unlocked!");
+            setMessage(result.message);
           } catch (error) {
             setMessage(error.message);
           }
@@ -567,6 +648,89 @@ export default function App() {
     } finally {
       setPaying(false);
     }
+  }
+
+  function renderAuthGate() {
+    if (token || authLoading || !authOpen) return null;
+
+    return (
+      <div className="auth-backdrop" onClick={() => setAuthOpen(false)}>
+        <section
+          className="auth-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="auth-title"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <div className="auth-modal-head">
+            <div className="label">YOUR DESKSWEEP ACCOUNT</div>
+            <button
+              className="preview-close"
+              onClick={() => setAuthOpen(false)}
+              aria-label="Close sign in"
+            >
+              <X size={18} />
+            </button>
+          </div>
+          <h2 id="auth-title">
+            {authMode === "signup" ? "Create your account" : "Welcome back"}
+          </h2>
+          <p>
+            Sign in to keep your free attempts and Pro plan linked to your
+            email, even after a browser refresh.
+          </p>
+
+          <form onSubmit={submitAuth}>
+            <label htmlFor="account-email">Email</label>
+            <input
+              id="account-email"
+              name="email"
+              type="email"
+              autoComplete="email"
+              required
+            />
+
+            <label htmlFor="account-password">Password</label>
+            <input
+              id="account-password"
+              name="password"
+              type="password"
+              autoComplete={
+                authMode === "signup" ? "new-password" : "current-password"
+              }
+              minLength={authMode === "signup" ? 8 : undefined}
+              maxLength={128}
+              required
+            />
+
+            {authError && <div className="auth-error">{authError}</div>}
+
+            <button className="auth-submit" type="submit" disabled={authBusy}>
+              {authBusy
+                ? "Please wait..."
+                : authMode === "signup"
+                  ? "Sign up"
+                  : "Log in"}
+            </button>
+          </form>
+
+          <div className="auth-switch">
+            {authMode === "signup"
+              ? "Already have an account?"
+              : "New to DeskSweep?"}
+            <button
+              type="button"
+              onClick={() => {
+                setAuthMode(authMode === "signup" ? "login" : "signup");
+                setAuthError("");
+              }}
+            >
+              {authMode === "signup" ? "Log in" : "Create account"}
+            </button>
+          </div>
+        </section>
+      </div>
+    );
   }
 
   function renderPreview() {
@@ -684,9 +848,10 @@ export default function App() {
 
             <h3>3. Information We Store</h3>
             <p>
-              DeskSweep stores an anonymous browser client identifier, usage
+              DeskSweep stores your email address, a password hash, usage
               attempts, Pro access status and payment-related order and
-              transaction identifiers needed to manage purchases.
+              transaction identifiers needed to manage your account and
+              purchases.
             </p>
 
             <h3>4. Payments</h3>
@@ -698,9 +863,9 @@ export default function App() {
 
             <h3>5. Browser Storage</h3>
             <p>
-              Local storage is used to remember your anonymous client identifier
-              and your light or dark theme preference. Clearing browser storage
-              may reset your local identifier.
+              Local storage remembers your sign-in token and light or dark
+              theme preference. Your account and usage stay linked to your
+              email if browser storage is cleared; you can sign in again.
             </p>
 
             <h3>6. Permissions</h3>
@@ -719,7 +884,7 @@ export default function App() {
 
             <h3>8. Data Retention</h3>
             <p>
-              Anonymous usage and payment records may be retained as needed to
+              Account, usage and payment records may be retained as needed to
               provide the service, manage purchases and maintain appropriate
               business records.
             </p>
@@ -758,6 +923,32 @@ export default function App() {
             <ShieldCheck size={15} />
             Your files stay on your device
           </div>
+
+          {token && (
+            <div className="account-controls">
+              <span>{authEmail}</span>
+              <button className="account-signout" onClick={signOut}>
+                Sign out
+              </button>
+            </div>
+          )}
+
+          {!token && (
+            <div className="auth-actions">
+              <button
+                className="auth-login-link"
+                onClick={() => openAuth("login")}
+              >
+                Log in
+              </button>
+              <button
+                className="auth-signup-link"
+                onClick={() => openAuth("signup")}
+              >
+                Sign up
+              </button>
+            </div>
+          )}
 
           <button
             className="theme-toggle"
@@ -814,14 +1005,21 @@ export default function App() {
                 {directory ? directory.name : "Choose a folder to organize"}
               </h2>
               <p className="card-description">
-                Select a folder and let DeskSweep do the sorting.
+                {token
+                  ? "Select a folder and let DeskSweep do the sorting."
+                  : "Log in or sign up before selecting a folder."}
               </p>
             </div>
 
             <button
               className="select-button"
               onClick={selectFolder}
-              disabled={busy}
+              disabled={!token || authLoading || busy}
+              title={
+                !token
+                  ? "Log in or sign up to select a folder"
+                  : undefined
+              }
             >
               <Folder size={16} />
               {directory ? "Change folder" : "Select folder"}
@@ -863,7 +1061,7 @@ export default function App() {
           <button
             className="scan-button"
             onClick={scanFolder}
-            disabled={!directory || busy}
+            disabled={!token || authLoading || !directory || busy}
           >
             {busy ? (
               <LoaderCircle className="spin" size={17} />
@@ -1101,7 +1299,9 @@ export default function App() {
                 ? "Unlimited file organization"
                 : access
                   ? `${access.attempts_remaining} of 2 free attempts remaining`
-                  : "Loading your plan..."}
+                  : token
+                    ? "Loading your plan..."
+                    : "Log in to see your plan"}
             </span>
           </div>
 
@@ -1137,8 +1337,8 @@ export default function App() {
             <strong>Your files are yours. Always.</strong>
             <p>
               File scanning, previewing and organization happen in your browser.
-              DeskSweep stores limited anonymous usage and payment records, not
-              your file contents.
+              DeskSweep stores your email, usage and payment records, not your
+              file contents.
             </p>
           </div>
 
@@ -1192,11 +1392,12 @@ export default function App() {
         <div className="footnote">
           <ShieldCheck size={14} />
           Your selected files are processed locally in your browser. Only
-          anonymous usage and payment status are sent to DeskSweep.
+          account usage and payment status are sent to DeskSweep.
         </div>
       </main>
 
       {renderPreview()}
+      {renderAuthGate()}
       {renderPrivacyPolicy()}
 
       <footer className="site-footer">

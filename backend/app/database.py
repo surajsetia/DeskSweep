@@ -44,12 +44,23 @@ def init_db():
         """
         CREATE TABLE IF NOT EXISTS customers (
             client_id TEXT PRIMARY KEY,
+            email TEXT,
+            password_hash TEXT,
             attempts_used INTEGER NOT NULL DEFAULT 0
                 CHECK (attempts_used >= 0),
             is_pro BOOLEAN NOT NULL DEFAULT FALSE,
+            pro_email_sent_at TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
+        """,
+
+        "ALTER TABLE customers ADD COLUMN IF NOT EXISTS email TEXT",
+        "ALTER TABLE customers ADD COLUMN IF NOT EXISTS password_hash TEXT",
+        "ALTER TABLE customers ADD COLUMN IF NOT EXISTS pro_email_sent_at TEXT",
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_email
+        ON customers(email)
         """,
 
         """

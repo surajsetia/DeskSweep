@@ -3,13 +3,14 @@ import os
 import hmac
 import hashlib
 import json
+import logging
 import razorpay
 
-from uuid import UUID
-from fastapi import APIRouter, HTTPException, Request
+from uuid import uuid4
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.database import get_db
-from app.schemas import ClientPayload, PaymentVerifyPayload
+from app.schemas import LoginPayload, PaymentVerifyPayload, SignupPayload
 
 from app.services.access import (
     FREE_ATTEMPTS,
@@ -19,9 +20,17 @@ from app.services.access import (
     record_successful_attempt,
     utc_now,
 )
+from app.services.auth import (
+    create_access_token,
+    get_current_email,
+    hash_password,
+    verify_password,
+)
+from app.services.email import send_pro_email_once
 
 
 router = APIRouter(prefix="/api")
+logger = logging.getLogger(__name__)
 
 
 # --------------------------------------------------
@@ -59,19 +68,72 @@ def health():
 # CUSTOMER ACCESS
 # --------------------------------------------------
 
-@router.get("/access/{client_id}")
-def get_access(client_id: str):
-    try:
-        client_id = str(UUID(client_id))
-    except ValueError:
+@router.post("/auth/signup")
+def signup(payload: SignupPayload):
+    email = str(payload.email).strip().lower()
+    token = create_access_token(email)
+    now = utc_now()
+
+    with get_db() as conn:
+        customer = conn.execute(
+            """
+            INSERT INTO customers (
+                client_id,
+                email,
+                password_hash,
+                attempts_used,
+                is_pro,
+                created_at,
+                updated_at
+            )
+            VALUES (%s, %s, %s, 0, FALSE, %s, %s)
+            ON CONFLICT (email) DO NOTHING
+            RETURNING *
+            """,
+            (str(uuid4()), email, hash_password(payload.password), now, now),
+        ).fetchone()
+
+    if not customer:
         raise HTTPException(
-            status_code=400,
-            detail="Invalid client ID"
+            status_code=409,
+            detail="An account with this email already exists."
         )
 
-    customer = ensure_customer(client_id)
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        **access_status(customer),
+    }
 
-    return access_status(customer)
+
+@router.post("/auth/login")
+def login(payload: LoginPayload):
+    email = str(payload.email).strip().lower()
+
+    with get_db() as conn:
+        customer = conn.execute(
+            "SELECT * FROM customers WHERE email = %s",
+            (email,),
+        ).fetchone()
+
+    if not customer or not customer["password_hash"] or not verify_password(
+        payload.password, customer["password_hash"]
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Email or password is incorrect."
+        )
+
+    return {
+        "access_token": create_access_token(email),
+        "token_type": "bearer",
+        **access_status(customer),
+    }
+
+
+@router.get("/access")
+def get_access(email: str = Depends(get_current_email)):
+    return access_status(ensure_customer(email))
 
 
 # --------------------------------------------------
@@ -79,10 +141,8 @@ def get_access(client_id: str):
 # --------------------------------------------------
 
 @router.post("/usage/complete")
-def complete_usage(payload: ClientPayload):
-    return record_successful_attempt(
-        str(payload.client_id)
-    )
+def complete_usage(email: str = Depends(get_current_email)):
+    return record_successful_attempt(email)
 
 
 # --------------------------------------------------
@@ -90,11 +150,11 @@ def complete_usage(payload: ClientPayload):
 # --------------------------------------------------
 
 @router.post("/payments/create-order")
-def create_order(payload: ClientPayload):
+def create_order(email: str = Depends(get_current_email)):
     client, key_id = razorpay_client()
 
-    client_id = str(payload.client_id)
-    customer = ensure_customer(client_id)
+    customer = ensure_customer(email)
+    client_id = customer["client_id"]
 
     if customer["is_pro"]:
         return {
@@ -115,9 +175,9 @@ def create_order(payload: ClientPayload):
         order = client.order.create({
             "amount": PRICE_PAISE,
             "currency": "INR",
-            "receipt": f"ds_{client_id.replace('-', '')[:20]}",
+            "receipt": f"ds_{hashlib.sha256(email.encode('utf-8')).hexdigest()[:20]}",
             "notes": {
-                "client_id": client_id,
+                "email": email,
                 "product": "DeskSweep Pro"
             }
         })
@@ -166,19 +226,20 @@ def create_order(payload: ClientPayload):
 def apply_verified_payment(
     payment_id: str,
     order_id: str,
-    client_id: str
+    email: str
 ):
     with get_db() as conn:
 
         order = conn.execute(
             """
-            SELECT *
-            FROM orders
-            WHERE order_id = %s
-              AND client_id = %s
-            FOR UPDATE
+            SELECT o.*
+            FROM orders o
+            JOIN customers c ON c.client_id = o.client_id
+            WHERE o.order_id = %s
+              AND c.email = %s
+            FOR UPDATE OF o
             """,
-            (order_id, client_id)
+            (order_id, email)
         ).fetchone()
 
         if not order or int(order["amount"]) != PRICE_PAISE:
@@ -186,6 +247,8 @@ def apply_verified_payment(
                 status_code=400,
                 detail="Order not found or amount mismatch."
             )
+
+        client_id = order["client_id"]
 
         conn.execute(
             """
@@ -241,9 +304,9 @@ def apply_verified_payment(
             """
             SELECT *
             FROM customers
-            WHERE client_id = %s
+            WHERE email = %s
             """,
-            (client_id,)
+            (email,)
         ).fetchone()
 
     return access_status(row)
@@ -254,22 +317,26 @@ def apply_verified_payment(
 # --------------------------------------------------
 
 @router.post("/payments/verify")
-def verify_payment(payload: PaymentVerifyPayload):
+def verify_payment(
+    payload: PaymentVerifyPayload,
+    email: str = Depends(get_current_email),
+):
     client, _ = razorpay_client()
 
-    client_id = str(payload.client_id)
     order_id = payload.razorpay_order_id
     payment_id = payload.razorpay_payment_id
+    customer = ensure_customer(email)
 
     with get_db() as conn:
         order = conn.execute(
             """
-            SELECT *
-            FROM orders
-            WHERE order_id = %s
-              AND client_id = %s
+            SELECT o.*
+            FROM orders o
+            JOIN customers c ON c.client_id = o.client_id
+            WHERE o.order_id = %s
+              AND c.email = %s
             """,
-            (order_id, client_id)
+            (order_id, email)
         ).fetchone()
 
     if not order or int(order["amount"]) != PRICE_PAISE:
@@ -320,12 +387,24 @@ def verify_payment(payload: PaymentVerifyPayload):
     result = apply_verified_payment(
         payment_id,
         order_id,
-        client_id
+        email
     )
+
+    email_sent = True
+    try:
+        send_pro_email_once(customer["client_id"], email)
+    except Exception:
+        email_sent = False
+        logger.exception("Could not send Pro confirmation email")
 
     return {
         **result,
-        "message": "Payment verified. DeskSweep Pro unlocked."
+        "email_sent": email_sent,
+        "message": (
+            "Payment verified. DeskSweep Pro unlocked."
+            if email_sent
+            else "Pro is unlocked, but the confirmation email could not be sent."
+        )
     }
 
 
@@ -420,6 +499,8 @@ async def razorpay_webhook(request: Request):
         or hashlib.sha256(body).hexdigest()
     )
 
+    email = None
+
     with get_db() as conn:
 
         existing_event = conn.execute(
@@ -451,6 +532,18 @@ async def razorpay_webhook(request: Request):
             )
 
         client_id = order["client_id"]
+        customer = conn.execute(
+            "SELECT email FROM customers WHERE client_id = %s",
+            (client_id,)
+        ).fetchone()
+
+        if not customer or not customer["email"]:
+            raise HTTPException(
+                status_code=400,
+                detail="This order is not linked to an email account."
+            )
+
+        email = customer["email"]
 
         conn.execute(
             """
@@ -502,6 +595,16 @@ async def razorpay_webhook(request: Request):
             (utc_now(), client_id)
         )
 
+    try:
+        send_pro_email_once(client_id, email)
+    except Exception:
+        logger.exception("Could not send Pro confirmation email")
+        raise HTTPException(
+            status_code=503,
+            detail="Pro is unlocked, but the confirmation email could not be sent yet."
+        )
+
+    with get_db() as conn:
         conn.execute(
             """
             INSERT INTO webhook_events (

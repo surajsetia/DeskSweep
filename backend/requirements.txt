@@ -5,3 +5,5 @@ razorpay>=1.4,<2
 python-dotenv>=1.0,<2
 setuptools<82
 psycopg[binary]>=3.2,<4
+PyJWT>=2.8,<3
+email-validator>=2.0,<3
