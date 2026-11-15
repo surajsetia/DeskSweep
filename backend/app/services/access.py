@@ -15,21 +15,20 @@ def utc_now():
 
 
 def ensure_customer(client_id: str):
-
     now = utc_now()
 
     with get_db() as conn:
-
         conn.execute(
             """
-            INSERT OR IGNORE INTO customers (
+            INSERT INTO customers (
                 client_id,
                 attempts_used,
                 is_pro,
                 created_at,
                 updated_at
             )
-            VALUES (?, 0, 0, ?, ?)
+            VALUES (%s, 0, FALSE, %s, %s)
+            ON CONFLICT (client_id) DO NOTHING
             """,
             (client_id, now, now)
         )
@@ -38,7 +37,7 @@ def ensure_customer(client_id: str):
             """
             SELECT *
             FROM customers
-            WHERE client_id = ?
+            WHERE client_id = %s
             """,
             (client_id,)
         ).fetchone()
@@ -47,14 +46,10 @@ def ensure_customer(client_id: str):
 
 
 def access_status(row):
-
     used = int(row["attempts_used"])
     pro = bool(row["is_pro"])
 
-    remaining = (
-        0 if pro
-        else max(0, FREE_ATTEMPTS - used)
-    )
+    remaining = 0 if pro else max(0, FREE_ATTEMPTS - used)
 
     return {
         "client_id": row["client_id"],
@@ -68,23 +63,21 @@ def access_status(row):
 
 
 def record_successful_attempt(client_id: str):
-
     ensure_customer(client_id)
 
     now = utc_now()
 
     with get_db() as conn:
-
         cursor = conn.execute(
             """
             UPDATE customers
             SET
                 attempts_used = attempts_used + 1,
-                updated_at = ?
+                updated_at = %s
             WHERE
-                client_id = ?
-                AND is_pro = 0
-                AND attempts_used < ?
+                client_id = %s
+                AND is_pro = FALSE
+                AND attempts_used < %s
             """,
             (now, client_id, FREE_ATTEMPTS)
         )
@@ -93,12 +86,12 @@ def record_successful_attempt(client_id: str):
             """
             SELECT *
             FROM customers
-            WHERE client_id = ?
+            WHERE client_id = %s
             """,
             (client_id,)
         ).fetchone()
 
-        if bool(row["is_pro"]):
+        if row["is_pro"]:
             return access_status(row)
 
         if cursor.rowcount == 0:
@@ -114,7 +107,7 @@ def record_successful_attempt(client_id: str):
             """
             SELECT *
             FROM customers
-            WHERE client_id = ?
+            WHERE client_id = %s
             """,
             (client_id,)
         ).fetchone()

@@ -29,7 +29,6 @@ router = APIRouter(prefix="/api")
 # --------------------------------------------------
 
 def razorpay_client():
-
     key_id = os.getenv("RAZORPAY_KEY_ID", "").strip()
     key_secret = os.getenv("RAZORPAY_KEY_SECRET", "").strip()
 
@@ -50,7 +49,6 @@ def razorpay_client():
 
 @router.get("/health")
 def health():
-
     return {
         "status": "ok",
         "service": "DeskSweep"
@@ -63,10 +61,8 @@ def health():
 
 @router.get("/access/{client_id}")
 def get_access(client_id: str):
-
     try:
         client_id = str(UUID(client_id))
-
     except ValueError:
         raise HTTPException(
             status_code=400,
@@ -84,7 +80,6 @@ def get_access(client_id: str):
 
 @router.post("/usage/complete")
 def complete_usage(payload: ClientPayload):
-
     return record_successful_attempt(
         str(payload.client_id)
     )
@@ -96,14 +91,12 @@ def complete_usage(payload: ClientPayload):
 
 @router.post("/payments/create-order")
 def create_order(payload: ClientPayload):
-
     client, key_id = razorpay_client()
 
     client_id = str(payload.client_id)
-
     customer = ensure_customer(client_id)
 
-    if bool(customer["is_pro"]):
+    if customer["is_pro"]:
         return {
             "already_pro": True,
             "is_pro": True
@@ -119,7 +112,6 @@ def create_order(payload: ClientPayload):
         )
 
     try:
-
         order = client.order.create({
             "amount": PRICE_PAISE,
             "currency": "INR",
@@ -137,7 +129,6 @@ def create_order(payload: ClientPayload):
         )
 
     with get_db() as conn:
-
         conn.execute(
             """
             INSERT INTO orders (
@@ -147,7 +138,7 @@ def create_order(payload: ClientPayload):
                 status,
                 created_at
             )
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s)
             """,
             (
                 order["id"],
@@ -169,29 +160,116 @@ def create_order(payload: ClientPayload):
 
 
 # --------------------------------------------------
-# VERIFY PAYMENT
+# APPLY VERIFIED PAYMENT
 # --------------------------------------------------
 
-@router.post("/payments/verify")
-def verify_payment(payload: PaymentVerifyPayload):
-
-    client, _ = razorpay_client()
-
-    client_id = str(payload.client_id)
-
+def apply_verified_payment(
+    payment_id: str,
+    order_id: str,
+    client_id: str
+):
     with get_db() as conn:
 
         order = conn.execute(
             """
             SELECT *
             FROM orders
-            WHERE order_id = ?
-            AND client_id = ?
+            WHERE order_id = %s
+              AND client_id = %s
+            FOR UPDATE
             """,
-            (
-                payload.razorpay_order_id,
-                client_id
+            (order_id, client_id)
+        ).fetchone()
+
+        if not order or int(order["amount"]) != PRICE_PAISE:
+            raise HTTPException(
+                status_code=400,
+                detail="Order not found or amount mismatch."
             )
+
+        conn.execute(
+            """
+            INSERT INTO payments (
+                payment_id,
+                order_id,
+                client_id,
+                created_at
+            )
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (payment_id) DO NOTHING
+            """,
+            (payment_id, order_id, client_id, utc_now())
+        )
+
+        existing = conn.execute(
+            """
+            SELECT *
+            FROM payments
+            WHERE payment_id = %s
+            """,
+            (payment_id,)
+        ).fetchone()
+
+        if (
+            existing["order_id"] != order_id
+            or existing["client_id"] != client_id
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Payment already applied to another order."
+            )
+
+        conn.execute(
+            """
+            UPDATE orders
+            SET status = 'paid'
+            WHERE order_id = %s
+            """,
+            (order_id,)
+        )
+
+        conn.execute(
+            """
+            UPDATE customers
+            SET is_pro = TRUE, updated_at = %s
+            WHERE client_id = %s
+            """,
+            (utc_now(), client_id)
+        )
+
+        row = conn.execute(
+            """
+            SELECT *
+            FROM customers
+            WHERE client_id = %s
+            """,
+            (client_id,)
+        ).fetchone()
+
+    return access_status(row)
+
+
+# --------------------------------------------------
+# VERIFY PAYMENT
+# --------------------------------------------------
+
+@router.post("/payments/verify")
+def verify_payment(payload: PaymentVerifyPayload):
+    client, _ = razorpay_client()
+
+    client_id = str(payload.client_id)
+    order_id = payload.razorpay_order_id
+    payment_id = payload.razorpay_payment_id
+
+    with get_db() as conn:
+        order = conn.execute(
+            """
+            SELECT *
+            FROM orders
+            WHERE order_id = %s
+              AND client_id = %s
+            """,
+            (order_id, client_id)
         ).fetchone()
 
     if not order or int(order["amount"]) != PRICE_PAISE:
@@ -200,21 +278,14 @@ def verify_payment(payload: PaymentVerifyPayload):
             detail="Order not found or amount mismatch."
         )
 
-    # Verify Razorpay signature.
-
     try:
-
         client.utility.verify_payment_signature({
-            "razorpay_order_id": payload.razorpay_order_id,
-            "razorpay_payment_id": payload.razorpay_payment_id,
+            "razorpay_order_id": order_id,
+            "razorpay_payment_id": payment_id,
             "razorpay_signature": payload.razorpay_signature
         })
 
-        # Fetch actual payment details.
-
-        payment = client.payment.fetch(
-            payload.razorpay_payment_id
-        )
+        payment = client.payment.fetch(payment_id)
 
     except Exception:
         raise HTTPException(
@@ -222,7 +293,7 @@ def verify_payment(payload: PaymentVerifyPayload):
             detail="Payment verification failed."
         )
 
-    if payment.get("order_id") != payload.razorpay_order_id:
+    if payment.get("order_id") != order_id:
         raise HTTPException(
             status_code=400,
             detail="Payment does not belong to this order."
@@ -246,77 +317,14 @@ def verify_payment(payload: PaymentVerifyPayload):
             detail="Payment is not captured yet."
         )
 
-    with get_db() as conn:
-
-        existing = conn.execute(
-            """
-            SELECT *
-            FROM payments
-            WHERE payment_id = ?
-            """,
-            (payload.razorpay_payment_id,)
-        ).fetchone()
-
-        if existing:
-
-            if (
-                existing["client_id"] != client_id
-                or existing["order_id"] != payload.razorpay_order_id
-            ):
-                raise HTTPException(
-                    status_code=409,
-                    detail="Payment already applied."
-                )
-
-        else:
-
-            conn.execute(
-                """
-                INSERT INTO payments (
-                    payment_id,
-                    order_id,
-                    client_id,
-                    created_at
-                )
-                VALUES (?, ?, ?, ?)
-                """,
-                (
-                    payload.razorpay_payment_id,
-                    payload.razorpay_order_id,
-                    client_id,
-                    utc_now()
-                )
-            )
-
-        conn.execute(
-            """
-            UPDATE orders
-            SET status = 'paid'
-            WHERE order_id = ?
-            """,
-            (payload.razorpay_order_id,)
-        )
-
-        conn.execute(
-            """
-            UPDATE customers
-            SET is_pro = 1, updated_at = ?
-            WHERE client_id = ?
-            """,
-            (utc_now(), client_id)
-        )
-
-        row = conn.execute(
-            """
-            SELECT *
-            FROM customers
-            WHERE client_id = ?
-            """,
-            (client_id,)
-        ).fetchone()
+    result = apply_verified_payment(
+        payment_id,
+        order_id,
+        client_id
+    )
 
     return {
-        **access_status(row),
+        **result,
         "message": "Payment verified. DeskSweep Pro unlocked."
     }
 
@@ -327,7 +335,6 @@ def verify_payment(payload: PaymentVerifyPayload):
 
 @router.post("/payments/webhook")
 async def razorpay_webhook(request: Request):
-
     webhook_secret = os.getenv(
         "RAZORPAY_WEBHOOK_SECRET", ""
     ).strip()
@@ -338,15 +345,11 @@ async def razorpay_webhook(request: Request):
             detail="Webhook secret is not configured."
         )
 
-    # Get raw request body.
-
     body = await request.body()
 
     signature = request.headers.get(
         "X-Razorpay-Signature", ""
     )
-
-    # Verify webhook signature.
 
     expected_signature = hmac.new(
         webhook_secret.encode("utf-8"),
@@ -363,11 +366,8 @@ async def razorpay_webhook(request: Request):
             detail="Invalid webhook signature."
         )
 
-    # Parse JSON.
-
     try:
         data = json.loads(body)
-
     except (json.JSONDecodeError, UnicodeDecodeError):
         raise HTTPException(
             status_code=400,
@@ -375,8 +375,6 @@ async def razorpay_webhook(request: Request):
         )
 
     event = data.get("event")
-
-    # Ignore events other than payment.captured.
 
     if event != "payment.captured":
         return {
@@ -398,8 +396,6 @@ async def razorpay_webhook(request: Request):
             status_code=400,
             detail="Payment or order ID missing."
         )
-
-    # Validate payment details.
 
     try:
         amount = int(payment.get("amount", 0))
@@ -426,29 +422,24 @@ async def razorpay_webhook(request: Request):
 
     with get_db() as conn:
 
-        # Prevent duplicate event processing.
-
         existing_event = conn.execute(
             """
             SELECT event_id
             FROM webhook_events
-            WHERE event_id = ?
+            WHERE event_id = %s
             """,
             (event_id,)
         ).fetchone()
 
         if existing_event:
-            return {
-                "status": "already_processed"
-            }
-
-        # Find the corresponding order.
+            return {"status": "already_processed"}
 
         order = conn.execute(
             """
             SELECT *
             FROM orders
-            WHERE order_id = ?
+            WHERE order_id = %s
+            FOR UPDATE
             """,
             (order_id,)
         ).fetchone()
@@ -461,73 +452,55 @@ async def razorpay_webhook(request: Request):
 
         client_id = order["client_id"]
 
-        # Prevent payment reuse.
+        conn.execute(
+            """
+            INSERT INTO payments (
+                payment_id,
+                order_id,
+                client_id,
+                created_at
+            )
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (payment_id) DO NOTHING
+            """,
+            (payment_id, order_id, client_id, utc_now())
+        )
 
         existing_payment = conn.execute(
             """
             SELECT *
             FROM payments
-            WHERE payment_id = ?
+            WHERE payment_id = %s
             """,
             (payment_id,)
         ).fetchone()
 
-        if existing_payment:
-
-            if (
-                existing_payment["order_id"] != order_id
-                or existing_payment["client_id"] != client_id
-            ):
-                raise HTTPException(
-                    status_code=409,
-                    detail="Payment already applied to another order."
-                )
-
-        else:
-
-            conn.execute(
-                """
-                INSERT INTO payments (
-                    payment_id,
-                    order_id,
-                    client_id,
-                    created_at
-                )
-                VALUES (?, ?, ?, ?)
-                """,
-                (
-                    payment_id,
-                    order_id,
-                    client_id,
-                    utc_now()
-                )
+        if (
+            existing_payment["order_id"] != order_id
+            or existing_payment["client_id"] != client_id
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Payment already applied to another order."
             )
-
-        # Mark order as paid.
 
         conn.execute(
             """
             UPDATE orders
             SET status = 'paid'
-            WHERE order_id = ?
+            WHERE order_id = %s
             """,
             (order_id,)
         )
 
-        # Unlock Pro.
-
         conn.execute(
             """
             UPDATE customers
-            SET
-                is_pro = 1,
-                updated_at = ?
-            WHERE client_id = ?
+            SET is_pro = TRUE, updated_at = %s
+            WHERE client_id = %s
             """,
             (utc_now(), client_id)
         )
-
-        # Save processed event.
 
         conn.execute(
             """
@@ -535,7 +508,8 @@ async def razorpay_webhook(request: Request):
                 event_id,
                 created_at
             )
-            VALUES (?, ?)
+            VALUES (%s, %s)
+            ON CONFLICT (event_id) DO NOTHING
             """,
             (event_id, utc_now())
         )

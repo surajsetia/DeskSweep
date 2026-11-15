@@ -1,5 +1,7 @@
+
 fastapi>=0.115,<1
 uvicorn[standard]>=0.30,<1
 razorpay>=1.4,<2
 python-dotenv>=1.0,<2
 setuptools<82
+psycopg[binary]>=3.2,<4
