@@ -3,7 +3,7 @@ import {
   ArrowRight, Check, File, FileArchive, FileAudio, FileCode,
   FileImage, FileText, FileVideo, Folder, FolderOpen,
   LoaderCircle, RefreshCw, ShieldCheck, LockKeyhole, Search,
-  Eye, X, ChevronLeft, ChevronRight, Download, Sun, Moon,
+  Eye, EyeOff, X, ChevronLeft, ChevronRight, Download, Sun, Moon,
   Sparkles, Monitor, HardDrive, ShieldCheck as Shield,
 } from "lucide-react";
 
@@ -128,6 +128,7 @@ export default function App() {
   );
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState("");
+  const [passwordVisible, setPasswordVisible] = useState(false);
 
   const [searchQuery, setSearchQuery] = useState("");
   const [currentPage, setCurrentPage] = useState(1);
@@ -288,6 +289,7 @@ export default function App() {
   function openAuth(mode) {
     setAuthMode(mode);
     setAuthError("");
+    setPasswordVisible(false);
     setAuthOpen(true);
   }
 
@@ -691,17 +693,29 @@ export default function App() {
             />
 
             <label htmlFor="account-password">Password</label>
-            <input
-              id="account-password"
-              name="password"
-              type="password"
-              autoComplete={
-                authMode === "signup" ? "new-password" : "current-password"
-              }
-              minLength={authMode === "signup" ? 8 : undefined}
-              maxLength={128}
-              required
-            />
+            <div className="password-input-wrap">
+              <input
+                id="account-password"
+                name="password"
+                type={passwordVisible ? "text" : "password"}
+                autoComplete={
+                  authMode === "signup" ? "new-password" : "current-password"
+                }
+                minLength={authMode === "signup" ? 8 : undefined}
+                maxLength={128}
+                required
+              />
+              <button
+                className="password-toggle"
+                type="button"
+                onClick={() => setPasswordVisible((visible) => !visible)}
+                aria-label={passwordVisible ? "Hide password" : "Show password"}
+                aria-pressed={passwordVisible}
+                title={passwordVisible ? "Hide password" : "Show password"}
+              >
+                {passwordVisible ? <EyeOff size={17} /> : <Eye size={17} />}
+              </button>
+            </div>
 
             {authError && <div className="auth-error">{authError}</div>}
 
@@ -723,6 +737,7 @@ export default function App() {
               onClick={() => {
                 setAuthMode(authMode === "signup" ? "login" : "signup");
                 setAuthError("");
+                setPasswordVisible(false);
               }}
             >
               {authMode === "signup" ? "Log in" : "Create account"}
